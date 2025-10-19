@@ -65,7 +65,7 @@ def make_call():
 def answer_call():
     try:
         action_url = request.url_root.rstrip("/") + "/dtmf"
-        return jsonify([
+        pcmo = [
             {
                 "action": "play_get_input",
                 "file_name": FILE_KEY_1,
@@ -74,7 +74,8 @@ def answer_call():
                 "timeout": 10,
                 "action_url": action_url
             }
-        ]), 200
+        ]
+        return jsonify({"pcmo": pcmo}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -106,7 +107,7 @@ def handle_dtmf():
         if not digit:
             # Bad/missing input — ask again instead of 500
             action_url = request.url_root.rstrip("/") + "/dtmf"
-            resp = [{
+            pcmo = [{
                 "action": "play_get_input",
                 "file_name": FILE_KEY_1,
                 "max_digit": 1,
@@ -114,6 +115,7 @@ def handle_dtmf():
                 "timeout": 10,
                 "action_url": action_url
             }]
+            resp = {"pcmo": pcmo}
             app.logger.info("[dtmf] response=%s", json.dumps(resp))
             return jsonify(resp), 200
 
@@ -122,16 +124,11 @@ def handle_dtmf():
         # Logic for pressed key
         # For any valid input, play your second audio from CDN and keep the call alive
         if digit in {"1", "2"}:
-            # Use a single play_get_input with FILE_KEY_2 so the provider plays and waits without ending the call
-            action_url = request.url_root.rstrip("/") + "/dtmf"
-            actions = [{
-                "action": "play_get_input",
-                "file_name": FILE_KEY_2,
-                "max_digit": 1,
-                "max_retry": 1,
-                "timeout": 10,
-                "action_url": action_url
-            }]
+            # Minimal test: clear and play only FILE_KEY_2
+            actions = [
+                {"action": "clear"},
+                {"action": "play", "file_name": FILE_KEY_2}
+            ]
         else:
             # Repeat the first prompt on invalid input
             action_url = request.url_root.rstrip("/") + "/dtmf"
@@ -139,13 +136,13 @@ def handle_dtmf():
                 "action": "play_get_input",
                 "file_name": FILE_KEY_1,
                 "max_digit": 1,
-                "max_retry": 1,
+                "max_retry": 0,
                 "timeout": 10,
                 "action_url": action_url
             }]
 
         # IMPORTANT: TeleCMI expects PCMO wrapper in the webhook response
-        resp = actions
+        resp = {"pcmo": actions}
         app.logger.info("[dtmf] response=%s", json.dumps(resp))
         return jsonify(resp), 200
 
