@@ -1,8 +1,16 @@
 import os
 from flask import Flask, jsonify, request
 import json
+import logging
 
 app = Flask(__name__)
+
+# Configure logging to flow into Gunicorn/Render logs
+_gunicorn_logger = logging.getLogger('gunicorn.error')
+if _gunicorn_logger.handlers:
+    app.logger.handlers = _gunicorn_logger.handlers
+    app.logger.setLevel(_gunicorn_logger.level)
+app.logger.propagate = False
 
 # 🔹 Config (prefer environment variables on Render)
 APP_ID = int(os.environ.get("APP_ID", "4222424"))
@@ -57,18 +65,16 @@ def make_call():
 def answer_call():
     try:
         action_url = request.url_root.rstrip("/") + "/dtmf"
-        return jsonify({
-            "pcmo": [
-                {
-                    "action": "play_get_input",
-                    "file_name": FILE_KEY_1,
-                    "max_digit": 1,
-                    "max_retry": 2,
-                    "timeout": 10,
-                    "action_url": action_url
-                }
-            ]
-        }), 200
+        return jsonify([
+            {
+                "action": "play_get_input",
+                "file_name": FILE_KEY_1,
+                "max_digit": 1,
+                "max_retry": 2,
+                "timeout": 10,
+                "action_url": action_url
+            }
+        ]), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -76,42 +82,82 @@ def answer_call():
 @app.route('/dtmf', methods=['POST'])
 def handle_dtmf():
     try:
-        data = request.get_json() or {}
-        # TeleCMI may send 'digit' or 'digits' key depending on config
-        digit = str(data.get("dtmf") or data.get("digit") or data.get("digits") or "")
-        print(f"📞 User pressed: {digit}")
+        # Be tolerant to different clients (JSON, form-encoded, or raw)
+        data = request.get_json(silent=True) or {}
+        if not data and request.form:
+            data = request.form.to_dict()
+        if not data and request.data:
+            try:
+                data = json.loads(request.data.decode('utf-8'))
+            except Exception:
+                data = {}
 
-        # Logic for pressed key
-        # For any valid input, play your second audio from CDN
-        if digit in {"1", "2"}:
-            next_action = {
-                "action": "play",
-                "file_name": FILE_KEY_2
-            }
-        else:
-            # Repeat the first prompt on invalid input
+        # TeleCMI/clients may send 'dtmf', 'digit', or 'digits'
+        digit = str((data.get("dtmf") or data.get("digit") or data.get("digits") or "")).strip()
+
+        # Debug: log headers and payload
+        try:
+            app.logger.info("[dtmf] headers=%s", dict(request.headers))
+            app.logger.info("[dtmf] raw=%s", request.data.decode('utf-8', errors='ignore'))
+            app.logger.info("[dtmf] parsed=%s", data)
+        except Exception:
+            pass
+
+        if not digit:
+            # Bad/missing input — ask again instead of 500
             action_url = request.url_root.rstrip("/") + "/dtmf"
-            next_action = {
+            resp = [{
                 "action": "play_get_input",
                 "file_name": FILE_KEY_1,
                 "max_digit": 1,
                 "max_retry": 1,
                 "timeout": 10,
                 "action_url": action_url
-            }
+            }]
+            app.logger.info("[dtmf] response=%s", json.dumps(resp))
+            return jsonify(resp), 200
+
+        app.logger.info("📞 User pressed: %s", digit)
+
+        # Logic for pressed key
+        # For any valid input, play your second audio from CDN and keep the call alive
+        if digit in {"1", "2"}:
+            # Use a single play_get_input with FILE_KEY_2 so the provider plays and waits without ending the call
+            action_url = request.url_root.rstrip("/") + "/dtmf"
+            actions = [{
+                "action": "play_get_input",
+                "file_name": FILE_KEY_2,
+                "max_digit": 1,
+                "max_retry": 1,
+                "timeout": 10,
+                "action_url": action_url
+            }]
+        else:
+            # Repeat the first prompt on invalid input
+            action_url = request.url_root.rstrip("/") + "/dtmf"
+            actions = [{
+                "action": "play_get_input",
+                "file_name": FILE_KEY_1,
+                "max_digit": 1,
+                "max_retry": 1,
+                "timeout": 10,
+                "action_url": action_url
+            }]
 
         # IMPORTANT: TeleCMI expects PCMO wrapper in the webhook response
-        return jsonify({
-            "pcmo": [
-                next_action
-            ]
-        }), 200
+        resp = actions
+        app.logger.info("[dtmf] response=%s", json.dumps(resp))
+        return jsonify(resp), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-# === Run the Flask app ===
+# === Health and index ===
+@app.route('/', methods=['GET'])
+def index():
+    return "IVR service running", 200
+
 @app.route('/healthz', methods=['GET'])
 def healthz():
     return "ok", 200
@@ -120,5 +166,5 @@ def healthz():
 # === Run the Flask app ===
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
-    print("🚀 Flask Server Running — Ready for Piopiy JSON API Logic")
+    app.logger.info("🚀 Flask Server Running — Ready for Piopiy JSON API Logic")
     app.run(host="0.0.0.0", port=port, debug=False)
